@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Document Text Extractor Pro</title>
+<style>
+body{font-family:system-ui,Segoe UI,Roboto,Arial;background:#f6f8fa;margin:0;color:#111}
+.container{max-width:980px;margin:40px auto;padding:20px;background:#fff;border-radius:12px;
+box-shadow:0 4px 20px rgba(0,0,0,0.08)}
+h1{margin:0 0 10px;font-size:22px}
+p{color:#555}
+#drop{border:2px dashed #ccc;padding:25px;text-align:center;border-radius:10px;background:#fafcff}
+#drop.dragover{border-color:#2563eb;background:#eef4ff}
+#fileInput{display:none}
+button{padding:8px 14px;border:none;border-radius:8px;background:#2563eb;color:#fff;cursor:pointer}
+button.secondary{background:#ddd;color:#333}
+select{padding:8px;border-radius:6px;border:1px solid #ccc}
+#progressContainer{width:100%;height:12px;background:#e5e7eb;border-radius:10px;margin:15px 0}
+#progressBar{height:12px;width:0;background:#2563eb;border-radius:10px;transition:width 0.2s}
+#preview{display:flex;flex-wrap:wrap;gap:10px;margin-top:15px}
+.preview-img{max-width:160px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.1)}
+pre{background:#0b1220;color:#e6f1ff;padding:12px;border-radius:10px;white-space:pre-wrap;
+max-height:400px;overflow:auto}
+.status{margin-top:10px;color:#374151;font-size:14px}
+footer{margin-top:18px;font-size:12px;color:#777;text-align:center}
+</style>
+
+<!-- Libraries -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.239/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.4.19/mammoth.browser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@2.1.5/dist/tesseract.min.js"></script>
+</head>
+<body>
+<div class="container">
+  <h1>AI Document Text Extractor Pro</h1>
+  <p>Upload PDF, DOCX, TXT, or image. Supports OCR for scanned PDFs and shows progress + previews.</p>
+
+  <div id="drop">
+    <strong>Drag & drop a file</strong> or
+    <label style="color:#2563eb;cursor:pointer">
+      <input type="file" id="fileInput"> browse
+    </label>
+  </div>
+
+  <div>
+    <select id="ocrLang">
+      <option value="eng">English (eng)</option>
+      <option value="hin">Hindi (hin)</option>
+    </select>
+    <button id="clearBtn" class="secondary">Clear</button>
+    <button id="copyBtn">Copy</button>
+    <button id="downloadBtn">Download .txt</button>
+  </div>
+
+  <div id="progressContainer"><div id="progressBar"></div></div>
+  <div class="status" id="status">Ready.</div>
+  <div id="preview"></div>
+  <pre id="output"></pre>
+  <footer>All processing is done locally in your browser.</footer>
+</div>
+
+<script>
+const fileInput=document.getElementById('fileInput');
+const drop=document.getElementById('drop');
+const status=document.getElementById('status');
+const output=document.getElementById('output');
+const progressBar=document.getElementById('progressBar');
+const ocrLang=document.getElementById('ocrLang');
+const preview=document.getElementById('preview');
+
+pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.239/pdf.worker.min.js';
+
+function setStatus(msg){status.textContent=msg;}
+function setProgress(p){progressBar.style.width=p+'%';}
+function showPreview(img){const el=document.createElement('img');el.src=img;el.className='preview-img';preview.appendChild(el);}
+
+drop.addEventListener('dragover',e=>{e.preventDefault();drop.classList.add('dragover');});
+drop.addEventListener('dragleave',()=>drop.classList.remove('dragover'));
+drop.addEventListener('drop',e=>{
+  e.preventDefault();drop.classList.remove('dragover');
+  if(e.dataTransfer.files.length)processFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change',e=>{
+  if(e.target.files.length)processFile(e.target.files[0]);
+  e.target.value='';
+});
+
+document.getElementById('clearBtn').onclick=()=>{
+  output.textContent='';status.textContent='Cleared.';preview.innerHTML='';setProgress(0);
+};
+document.getElementById('copyBtn').onclick=async()=>{
+  await navigator.clipboard.writeText(output.textContent);setStatus('Copied to clipboard.');
+};
+document.getElementById('downloadBtn').onclick=()=>{
+  const blob=new Blob([output.textContent],{type:'text/plain'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='extracted_text.txt';
+  a.click();URL.revokeObjectURL(a.href);
+};
+
+async function processFile(file){
+  preview.innerHTML='';output.textContent='';setProgress(0);
+  setStatus('Processing: '+file.name);
+  const ext=file.name.split('.').pop().toLowerCase();
+  if(ext==='pdf')await extractPDF(file);
+  else if(ext==='docx')await extractDocx(file);
+  else if(ext==='txt'||ext==='csv')output.textContent=await file.text();
+  else if(file.type.startsWith('image/'))await extractImage(file);
+  else output.textContent='Unsupported type.';
+}
+
+async function extractPDF(file){
+  setStatus('Loading PDF...');
+  const arrayBuffer=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:arrayBuffer}).promise;
+  let fullText='';const numPages=pdf.numPages;
+  for(let i=1;i<=numPages;i++){
+    setStatus(`Page ${i}/${numPages}...`);
+    const page=await pdf.getPage(i);
+    const text=await page.getTextContent();
+    let pageText=text.items.map(t=>t.str).join(' ');
+    if(pageText.trim().length<20){ // probably scanned image
+      setStatus(`Page ${i} seems scanned. Performing OCR...`);
+      const canvas=document.createElement('canvas');
+      const viewport=page.getViewport({scale:1.5});
+      canvas.width=viewport.width;canvas.height=viewport.height;
+      const ctx=canvas.getContext('2d');
+      await page.render({canvasContext:ctx,viewport}).promise;
+      showPreview(canvas.toDataURL());
+      const ocrText=await doOCR(canvas.toDataURL(),ocrLang.value,(i/numPages)*100);
+      pageText=ocrText;
+    }
+    fullText+=`\n\n--- Page ${i} ---\n${pageText}`;
+    setProgress((i/numPages)*100);
+  }
+  output.textContent=fullText.trim();
+  setStatus('PDF extraction complete.');
+  setProgress(100);
+}
+
+async function extractDocx(file){
+  setStatus('Extracting DOCX...');
+  const arrayBuffer=await file.arrayBuffer();
+  const res=await mammoth.extractRawText({arrayBuffer});
+  output.textContent=res.value||'';
+  setStatus('DOCX extraction complete.');
+  setProgress(100);
+}
+
+async function extractImage(file){
+  setStatus('Performing OCR on image...');
+  const dataURL=await readAsDataURL(file);
+  showPreview(dataURL);
+  const text=await doOCR(dataURL,ocrLang.value,100);
+  output.textContent=text;
+  setProgress(100);
+}
+
+async function doOCR(dataURL,lang,progBase){
+  return new Promise((resolve,reject)=>{
+    const worker=Tesseract.createWorker({
+      logger:m=>{
+        if(m.status==='recognizing text'){
+          const p=Math.min(100,progBase+(m.progress*100/100));
+          setProgress(p);
+          setStatus(`OCR Progress: ${Math.round(m.progress*100)}%`);
+        }
+      }
+    });
+    (async()=>{
+      try{
+        await worker.load();await worker.loadLanguage(lang);await worker.initialize(lang);
+        const {data:{text}}=await worker.recognize(dataURL);
+        await worker.terminate();
+        resolve(text);
+      }catch(e){reject(e);}
+    })();
+  });
+}
+
+function readAsDataURL(file){
+  return new Promise((res,rej)=>{
+    const fr=new FileReader();
+    fr.onload=()=>res(fr.result);
+    fr.onerror=rej;
+    fr.readAsDataURL(file);
+  });
+}
+</script>
+</body>
+    </html>
